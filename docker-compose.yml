@@ -1,0 +1,130 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+    container_name: tray_meli_app
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      APP_ENV: local
+    volumes:
+      - .:/var/www/html:delegated
+      - vendor_data:/var/www/html/vendor
+      - composer_cache:/tmp/composer-cache
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mockoon:
+        condition: service_started
+    command: >
+      sh -lc "
+        php artisan config:clear &&
+        php artisan cache:clear &&
+        php artisan serve --host=0.0.0.0 --port=8000
+      "
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+    container_name: tray_meli_worker
+    env_file:
+      - .env
+    environment:
+      APP_ENV: local
+    volumes:
+      - .:/var/www/html:delegated
+      - vendor_data:/var/www/html/vendor
+      - composer_cache:/tmp/composer-cache
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mockoon:
+        condition: service_started
+    command: >
+      sh -lc "
+        php artisan queue:work rabbitmq
+          --queue=${RABBITMQ_QUEUE:-meli-items}
+          --sleep=1
+          --tries=3
+          --timeout=60
+          --backoff=2
+          --max-jobs=200
+          --max-time=3600
+          --memory=256
+      "
+
+  mysql:
+    image: mysql:8.0
+    container_name: tray_meli_mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: tray_meli
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-proot"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: tray_meli_rabbit
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - ./docker/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      - ./docker/rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: tray_meli_redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  mockoon:
+    image: mockoon/cli:latest
+    container_name: tray_meli_mock
+    command: ["-d", "/data/meli-mockoon.json", "-p", "3001"]
+    volumes:
+      - ./meli-mockoon.json:/data/meli-mockoon.json:ro
+    ports:
+      - "3001:3001"
+
+volumes:
+  mysql_data:
+    name: tray_meli_mysql_data
+
+  vendor_data:
+    name: tray_meli_vendor_data
+
+  composer_cache:
+    name: tray_meli_composer_cache
